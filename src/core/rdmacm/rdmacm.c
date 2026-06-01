@@ -402,6 +402,34 @@ evpl_rdmacm_event_callback(
 
             bind = evpl_private2bind(rdmacm_id);
 
+            /* DIAG: query the QP attributes the kernel ended up programming
+             * after rdma_cm completed connection setup so we can see whether
+             * our conn_param.initiator_depth / responder_resources actually
+             * reached ibv_modify_qp.  If max_rd_atomic / max_dest_rd_atomic
+             * are 0 here despite us asking for 16, rdma_cm didn't honor the
+             * value (and that's why RDMA_READs are aborted by the responder
+             * with Mellanox syndrome 0x22/0x95). */
+            if (!rdmacm_id->ud && rdmacm_id->id->qp) {
+                struct ibv_qp_attr      qpa;
+                struct ibv_qp_init_attr qpi;
+                int                     mask =
+                    IBV_QP_STATE | IBV_QP_MAX_QP_RD_ATOMIC |
+                    IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_PATH_MTU;
+                int qrc = ibv_query_qp(rdmacm_id->id->qp, &qpa, mask, &qpi);
+                if (qrc == 0) {
+                    evpl_rdmacm_info(
+                        "DIAG QP established qp_num=%u state=%d max_rd_atomic=%u "
+                        "max_dest_rd_atomic=%u path_mtu=%d",
+                        rdmacm_id->qp_num, (int) qpa.qp_state,
+                        qpa.max_rd_atomic, qpa.max_dest_rd_atomic,
+                        (int) qpa.path_mtu);
+                } else {
+                    evpl_rdmacm_info(
+                        "DIAG QP established qp_num=%u ibv_query_qp failed rc=%d errno=%s",
+                        rdmacm_id->qp_num, qrc, strerror(errno));
+                }
+            }
+
             if (cm_event->id == rdmacm_id->resolve_id) {
 
                 ah = evpl_zalloc(sizeof(*ah));
