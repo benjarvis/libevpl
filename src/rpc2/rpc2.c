@@ -1028,6 +1028,23 @@ evpl_rpc2_recv_msg(
          * instead we should have an rdma_msg xdr structure
          * which describes the rdma particulars of the message */
 
+        /* DIAG: dump the first 64 bytes of the received RDMA SEND payload before
+         * unmarshalling, so we can compare against the client's wire-out log. */
+        {
+            const unsigned char *p   = (const unsigned char *) iovec[0].data;
+            unsigned int         l   = iovec[0].length < 64 ? iovec[0].length : 64;
+            char                 buf[3 * 64 + 1];
+            unsigned int         i, off = 0;
+            for (i = 0; i < l; i++) {
+                off += snprintf(buf + off, sizeof(buf) - off, "%02x ", p[i]);
+            }
+            buf[off ? off - 1 : 0] = '\0';
+            evpl_rpc2_info(
+                "DIAG server wire-in length=%d niov=%d iov0_data=%p iov0_len=%u bytes[0..%u]=%s",
+                length, niov,
+                iovec[0].data, iovec[0].length, l, buf);
+        }
+
         offset = unmarshall_rdma_msg(&rdma_msg,
                                      iovec,
                                      niov,
@@ -1949,6 +1966,24 @@ evpl_rpc2_call(
     } else {
         /* Add 4-byte record marking header for TCP at the start of the output buffer */
         *(uint32_t *) req_iov[0].data = rpc2_hton32((total_length - 4) | 0x80000000);
+    }
+
+    /* DIAG: dump the first 64 bytes of the SEND payload on the RDMA path so we
+     * can see exactly what we are putting on the wire (rdma_msg at offset 0
+     * including target.offset at bytes 32..40). */
+    if (rdma) {
+        const unsigned char *p   = (const unsigned char *) req_iov[0].data;
+        unsigned int         len = req_iov[0].length < 64 ? req_iov[0].length : 64;
+        char                 buf[3 * 64 + 1];
+        unsigned int         i, off = 0;
+        for (i = 0; i < len; i++) {
+            off += snprintf(buf + off, sizeof(buf) - off, "%02x ", p[i]);
+        }
+        buf[off ? off - 1 : 0] = '\0';
+        evpl_rpc2_info(
+            "DIAG client wire-out xid=%u proc=%u req_niov=%d total=%d iov0_data=%p iov0_len=%u bytes[0..%u]=%s",
+            request->xid, request->proc, req_niov, total_length,
+            req_iov[0].data, req_iov[0].length, len, buf);
     }
 
     /* Send the request - use out_iov which contains the marshalled header + payload */
