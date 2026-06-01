@@ -1250,6 +1250,18 @@ evpl_rpc2_recv_msg(
                         evpl_iovec_clone_segment(segment_iov, request->read_chunk.iov, segment_offset,
                                                  read_list->entry.target.length);
 
+                        /* DIAG: server side about to RDMA-read the client's read chunk */
+                        evpl_rpc2_info(
+                            "DIAG server issue rdma_read xid=%u proc=%u rkey=0x%08x addr=0x%016lx seg_len=%u "
+                            "seg_offset=%u local_data=%p local_len=%u",
+                            request->xid, request->proc,
+                            read_list->entry.target.handle,
+                            (unsigned long) read_list->entry.target.offset,
+                            read_list->entry.target.length,
+                            segment_offset,
+                            segment_iov->data,
+                            segment_iov->length);
+
                         evpl_rdma_read(evpl, request->bind,
                                        read_list->entry.target.handle, read_list->entry.target.offset,
                                        segment_iov, 1,
@@ -1842,6 +1854,19 @@ evpl_rpc2_call(
                                   rdma_chunk->iov,
                                   &read_list.entry.target.handle,
                                   &read_list.entry.target.offset);
+
+            /* DIAG: client side advertising a read chunk to the server */
+            evpl_rpc2_info(
+                "DIAG client advertise read_chunk xid=%u proc=%u rkey=0x%08x addr=0x%016lx adv_len=%u xdr_pos=%u "
+                "iov_data=%p iov_len=%u rdma_chunk_len=%u",
+                request->xid, request->proc,
+                read_list.entry.target.handle,
+                (unsigned long) read_list.entry.target.offset,
+                read_list.entry.target.length,
+                read_list.entry.position,
+                rdma_chunk->iov[0].data,
+                rdma_chunk->iov[0].length,
+                rdma_chunk->length);
 
             /* Move iovecs from caller to request (transfers ownership, invalidates caller's iovecs).
              * This matches TCP behavior where marshalling moves iovecs inline. */

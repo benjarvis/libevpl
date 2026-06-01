@@ -758,15 +758,23 @@ evpl_rdmacm_poll_cq(
                 case IBV_WC_SEND:
                 case IBV_WC_RDMA_READ:
                 case IBV_WC_RDMA_WRITE:
+                    dgram = (struct evpl_dgram *) cq->wr_id;
+                    /* DIAG: include dgram_type, remote_key, remote_address so we
+                     * can tell what the failed op actually targeted (the wc
+                     * opcode label can be misleading on failed completions). */
                     evpl_rdmacm_error(
-                        "rdma %s completion error wr_id %lu type %u status %u vendor_err %u",
+                        "rdma %s completion error wr_id %lu wc_op %u status %u vendor_err %u "
+                        "dgram_type=%u remote_key=0x%08x remote_addr=0x%016lx length=%u",
                         ibv_wc_opcode_str(ibv_wc_read_opcode(cq)),
                         cq->wr_id,
                         ibv_wc_read_opcode(cq),
                         cq->status,
-                        ibv_wc_read_vendor_err(cq));
+                        ibv_wc_read_vendor_err(cq),
+                        dgram->dgram_type,
+                        dgram->remote_key,
+                        (unsigned long) dgram->remote_address,
+                        dgram->length);
 
-                    dgram     = (struct evpl_dgram *) cq->wr_id;
                     rdmacm_id = evpl_bind_private(dgram->bind);
 
                     if (dgram->dgram_type == EVPL_DGRAM_TYPE_RDMA_READ) {
@@ -1335,6 +1343,15 @@ evpl_rdmacm_register(
 
         evpl_rdmacm_abort_if(!mrset[i], "Failed to register RDMA memory region")
         ;
+
+        /* DIAG: log each MR we register so we can confirm the rkey the client
+         * advertises later actually corresponds to a registration that covers
+         * the advertised address range. */
+        evpl_rdmacm_info(
+            "DIAG MR registered dev=%d pd=%p buf=%p..%p size=%d mr=%p lkey=0x%08x rkey=0x%08x",
+            i, (void *) rdmacm_devices->pd[i],
+            buffer, ((char *) buffer) + size, size,
+            (void *) mrset[i], mrset[i]->lkey, mrset[i]->rkey);
     }
 
     return mrset;
@@ -1370,6 +1387,17 @@ evpl_rdmacm_get_rdma_address(
 
     *r_key     = mr->rkey;
     *r_address = (uint64_t) iov->data;
+
+    /* DIAG: log every address lookup so we can correlate it with the MR
+     * registered above and the rkey/addr the peer eventually sees on the
+     * wire.  mrset/mr are the *client's* (this side's) registration. */
+    evpl_rdmacm_info(
+        "DIAG get_rdma_address devindex=%d mrset=%p mr=%p mr_addr=%p mr_length=%zu "
+        "rkey=0x%08x lkey=0x%08x iov_data=%p iov_len=%u",
+        rdmacm_id->devindex, (void *) mrset, (void *) mr,
+        mr->addr, mr->length,
+        mr->rkey, mr->lkey,
+        iov->data, iov->length);
 } /* evpl_rdmacm_get_rdma_address */
 
 static void
