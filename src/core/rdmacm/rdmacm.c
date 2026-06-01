@@ -259,6 +259,18 @@ evpl_rdmacm_create_qp(
     rdmacm_id->dev      = dev;
     rdmacm_id->devindex = dev->index;
 
+    /* DIAG: log which ibv device this QP is being created on so we can
+     * compare against the rkey's device.  Multi-NIC/bond topologies can
+     * have rdma_get_devices() returning >2 devices and a mismatch
+     * between rdmacm_id->devindex and the device the rkey was registered
+     * for would explain the responder rejecting the rkey lookup. */
+    evpl_rdmacm_info(
+        "DIAG QP creating devindex=%d device_name=%s context=%p pd=%p num_global_devices=%d",
+        rdmacm_id->devindex,
+        ibv_get_device_name(dev->context->device),
+        (void *) dev->context, (void *) dev->parent_pd,
+        rdmacm->num_devices);
+
     memset(&qp_attr, 0, sizeof(qp_attr));
 
     qp_attr.pd = dev->pd;
@@ -1374,10 +1386,12 @@ evpl_rdmacm_register(
 
         /* DIAG: log each MR we register so we can confirm the rkey the client
          * advertises later actually corresponds to a registration that covers
-         * the advertised address range. */
+         * the advertised address range. Include device name so we can spot
+         * multi-NIC / bond setups where the rkey is for the wrong device. */
         evpl_rdmacm_info(
-            "DIAG MR registered dev=%d pd=%p buf=%p..%p size=%d mr=%p lkey=0x%08x rkey=0x%08x",
-            i, (void *) rdmacm_devices->pd[i],
+            "DIAG MR registered dev=%d device_name=%s pd=%p buf=%p..%p size=%d mr=%p lkey=0x%08x rkey=0x%08x",
+            i, ibv_get_device_name(rdmacm_devices->context[i]->device),
+            (void *) rdmacm_devices->pd[i],
             buffer, ((char *) buffer) + size, size,
             (void *) mrset[i], mrset[i]->lkey, mrset[i]->rkey);
     }
@@ -1420,9 +1434,12 @@ evpl_rdmacm_get_rdma_address(
      * registered above and the rkey/addr the peer eventually sees on the
      * wire.  mrset/mr are the *client's* (this side's) registration. */
     evpl_rdmacm_info(
-        "DIAG get_rdma_address devindex=%d mrset=%p mr=%p mr_addr=%p mr_length=%zu "
-        "rkey=0x%08x lkey=0x%08x iov_data=%p iov_len=%u",
-        rdmacm_id->devindex, (void *) mrset, (void *) mr,
+        "DIAG get_rdma_address devindex=%d device_name=%s qp_device_name=%s mrset=%p mr=%p "
+        "mr_pd=%p mr_addr=%p mr_length=%zu rkey=0x%08x lkey=0x%08x iov_data=%p iov_len=%u",
+        rdmacm_id->devindex,
+        ibv_get_device_name(mr->context->device),
+        ibv_get_device_name(rdmacm_id->id->verbs->device),
+        (void *) mrset, (void *) mr, (void *) mr->pd,
         mr->addr, mr->length,
         mr->rkey, mr->lkey,
         iov->data, iov->length);
