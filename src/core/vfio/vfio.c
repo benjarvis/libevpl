@@ -689,6 +689,18 @@ evpl_vfio_queue_alloc(
     queue->prplist     = evpl_vfio_alloc(device->vfio, size << 12);
     queue->sq          = (union nvme_sq_entry *) queue->sqbuffer->buffer;
     queue->cq          = (struct nvme_cq_entry *) queue->cqbuffer->buffer;
+
+    /*
+     * The CQ buffer comes from evpl_valloc(), which does not zero memory.  The
+     * NVMe phase-bit protocol requires the CQ to start zeroed: a slot is a fresh
+     * completion when its phase bit differs from queue->cq_phase (which starts 0
+     * here via evpl_zalloc).  An uninitialized slot with a stale phase bit of 1
+     * is otherwise read as a bogus completion (garbage cid -> out-of-bounds
+     * callbacks[] access) before the controller ever writes a real one.  This
+     * only bites once enough queues have been created that the allocator hands
+     * back recycled, non-zero memory.
+     */
+    memset(queue->cq, 0, size * sizeof(struct nvme_cq_entry));
     queue->sq_doorbell = device->reg->sq0tdbl + 2 * id * device->dbstride;
     queue->cq_doorbell = queue->sq_doorbell + device->dbstride;
     queue->callbacks   = evpl_zalloc(size * sizeof(struct evpl_vfio_callback_ctx));
