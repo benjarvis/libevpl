@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <linux/vfio.h>
 #include <linux/pci.h>
@@ -50,6 +51,39 @@
 #define evpl_vfio_abort_if(cond, ...) \
         evpl_abort_if(cond, "vfio", __FILE__, __LINE__, __VA_ARGS__)
 
+/*
+ * Diagnostic tracing (gated by the EVPL_VFIO_TRACE env var).  When enabled,
+ * each queue logs its first EVPL_VFIO_TRACE_LIMIT submissions, doorbell rings,
+ * and completions -- bounded per queue so a high-rate phase can't flood the log
+ * while a stuck queue's submit-without-completion still stands out.  CREATE I/O
+ * queue failures are logged unconditionally (a real bug that was previously
+ * silently ignored).  Emitted at error level so they appear without -d.
+ */
+#define EVPL_VFIO_TRACE_LIMIT 16
+
+static int evpl_vfio_trace_flag = -1;
+
+static inline int
+evpl_vfio_trace_on(void)
+{
+    if (evpl_vfio_trace_flag < 0) {
+        const char *e = getenv("EVPL_VFIO_TRACE");
+        evpl_vfio_trace_flag = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return evpl_vfio_trace_flag;
+} /* evpl_vfio_trace_on */
+
+/* Block-callback that records the completion status into *arg (an int). */
+static void
+evpl_vfio_capture_status(
+    struct evpl *evpl,
+    int          status,
+    void        *arg)
+{
+    (void) evpl;
+    *(int *) arg = status;
+} /* evpl_vfio_capture_status */
+
 
 struct evpl_vfio_callback_ctx {
     evpl_block_callback_t fn;
@@ -89,6 +123,9 @@ struct evpl_vfio_queue {
     struct evpl_poll              *poll;
     int                            event_registered;
     struct evpl_vfio_callback_ctx *callbacks;
+    uint32_t                       trace_sub;   /* diagnostic: submits logged */
+    uint32_t                       trace_ring;  /* diagnostic: SQ rings logged */
+    uint32_t                       trace_cmp;   /* diagnostic: completions logged */
     struct evpl_vfio_queue        *prev;
     struct evpl_vfio_queue        *next;
 };
@@ -753,6 +790,13 @@ evpl_vfio_poll_queue(
             evpl_vfio_error("cqecid %d  cs %d sct %d sc %d", cid, cqe->cs, cqe->sct, cqe->sc);
         }
 
+        if (evpl_vfio_trace_on() && queue->id && queue->trace_cmp < EVPL_VFIO_TRACE_LIMIT) {
+            evpl_vfio_error("complete qid=%u cid=%d sc=%d cidcount=%d serial=%s",
+                            queue->id, cid, cqe->sc, queue->cidcount - 1,
+                            queue->device->serial);
+            queue->trace_cmp++;
+        }
+
         if (cb->fn) {
             cb->fn(evpl, cqe->sc ? EIO : 0, cb->arg);
         }
@@ -892,6 +936,7 @@ evpl_vfio_create_ioq(
     int                          cid;
     struct evpl_vfio_queue      *ioq;
     int                          id;
+    int                          cq_status = 0, sq_status = 0;
 
     pthread_mutex_lock(&device->lock);
 
@@ -910,7 +955,7 @@ evpl_vfio_create_ioq(
      */
     ioq->poll_mode = evpl->config.poll_mode;
 
-    cid = evpl_vfio_alloc_cid(device->adminq, NULL, 0);
+    cid = evpl_vfio_alloc_cid(device->adminq, evpl_vfio_capture_status, &cq_status);
 
     ccq_cmd = &device->adminq->sq[cid].create_cq;
 
@@ -926,7 +971,7 @@ evpl_vfio_create_ioq(
     ccq_cmd->iv          = ioq->id - 1;
 
     /* create the sq */
-    cid = evpl_vfio_alloc_cid(device->adminq, NULL, 0);
+    cid = evpl_vfio_alloc_cid(device->adminq, evpl_vfio_capture_status, &sq_status);
 
     csq_cmd = &device->adminq->sq[cid].create_sq;
 
@@ -944,6 +989,18 @@ evpl_vfio_create_ioq(
 
     while (device->adminq->cidcount > 0) {
         evpl_vfio_poll_queue(evpl, device->adminq);
+    }
+
+    if (cq_status || sq_status) {
+        evpl_vfio_error(
+            "create_ioq qid=%d FAILED (create_cq=%d create_sq=%d) "
+            "max_queues=%lu next_ioq_id=%u msixsize=%lu serial=%s -- queue is dead, "
+            "I/O to it will never complete",
+            id, cq_status, sq_status, (unsigned long) device->max_queues,
+            device->next_ioq_id, (unsigned long) device->msixsize, device->serial);
+    } else if (evpl_vfio_trace_on()) {
+        evpl_vfio_error("create_ioq qid=%d ok poll_mode=%d max_queues=%lu serial=%s",
+                        id, ioq->poll_mode, (unsigned long) device->max_queues, device->serial);
     }
 
     DL_APPEND(device->ioq, ioq);
@@ -1279,6 +1336,13 @@ evpl_vfio_read(
 
     evpl_vfio_prepare_payload(device, queue, cid, cmd, iov, niov);
 
+    if (evpl_vfio_trace_on() && queue->trace_sub < EVPL_VFIO_TRACE_LIMIT) {
+        evpl_vfio_error("submit READ  qid=%u cid=%d slba=%lu niov=%d cidcount=%d serial=%s",
+                        queue->id, cid, (unsigned long) cmd->slba, niov,
+                        queue->cidcount, device->serial);
+        queue->trace_sub++;
+    }
+
     evpl_defer(evpl, &queue->ring_sq);
 } /* evpl_vfio_read */
 
@@ -1330,6 +1394,13 @@ evpl_vfio_write(
     cmd->elbatm        = 0;
 
     evpl_vfio_prepare_payload(device, queue, cid, cmd, iov, niov);
+
+    if (evpl_vfio_trace_on() && queue->trace_sub < EVPL_VFIO_TRACE_LIMIT) {
+        evpl_vfio_error("submit WRITE qid=%u cid=%d slba=%lu niov=%d fua=%d cidcount=%d serial=%s",
+                        queue->id, cid, (unsigned long) cmd->slba, niov, !!sync,
+                        queue->cidcount, device->serial);
+        queue->trace_sub++;
+    }
 
     evpl_defer(evpl, &queue->ring_sq);
 
@@ -1528,6 +1599,13 @@ evpl_vfio_defer_ring_sq(
     void        *private_data)
 {
     struct evpl_vfio_queue *queue = private_data;
+
+    if (evpl_vfio_trace_on() && queue->id && queue->trace_ring < EVPL_VFIO_TRACE_LIMIT) {
+        evpl_vfio_error("ring_sq  qid=%u sq_tail=%d cidcount=%d serial=%s",
+                        queue->id, queue->sq_tail, queue->cidcount,
+                        queue->device->serial);
+        queue->trace_ring++;
+    }
 
     evpl_vfio_ring_sq(queue);
 } /* evpl_vfio_defer_ring_sq */
